@@ -4,8 +4,8 @@
             "name": "Win32",
             "includePath": [
                 "${workspaceFolder}/**",
-                "C:/Users/casey/AppData/Local/Arduino15/packages/rp2040/hardware/rp2040/3.3.2/pico-sdk/src/**",
-                "C:/Users/casey/AppData/Local/Arduino15/packages/rp2040/hardware/rp2040/3.3.2/include/**",
+                "${UserProfile}/AppData/Local/Arduino15/packages/rp2040/hardware/rp2040/*/pico-sdk/src/**",
+                "${UserProfile}/AppData/Local/Arduino15/packages/rp2040/hardware/rp2040/*/include/**"
             ],
             "defines": [
                 "_DEBUG",

@@ -1,3 +1,3 @@
-# PicoMCP25625
+# PicoMCP2515
 
-MCP25625 Library for Raspberry Pi Pico
+MCP2515 Library for Raspberry Pi Pico
