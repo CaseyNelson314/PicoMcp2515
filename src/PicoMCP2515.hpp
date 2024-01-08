@@ -6,17 +6,15 @@
 
 #pragma once
 
-#include <stdint.h>
-
-#include <hardware/gpio.h>
-#include <hardware/spi.h>
-#include <type_traits>
+#include "Mcp2515InstructionSet.hpp"
+#include <cfloat>
 
 #ifndef DEV_MODE
 #    error this library is developing now
 #endif
 
 class PicoMcp2515
+    : InstructionSet
 {
 
 public:
@@ -34,53 +32,28 @@ public:
 
     struct CanConfig
     {
-
         uint8_t interrupt;    // Receive interrupt pin
 
-        enum class Baudrate : uint8_t
-        {
-            CAN_10KBPS,
-            CAN_20KBPS,
-            CAN_50KBPS,
-            CAN_100KBPS,
-            CAN_125KBPS,
-            CAN_250KBPS,
-            CAN_500KBPS,
-            CAN_1MBPS,
-        };
+        uint32_t baudrate = 1'000'000;    // CAN bus baudrate [bps]
 
-        Baudrate baudrate = Baudrate::CAN_1MBPS;    // CAN bus baudrate [bps]
-
-        enum class CanMode : uint8_t
-        {
-            NORMAL,
-            LOOPBACK,
-            SLEEP,
-            LISTEN_ONLY,
-            CONFIG,
-        };
-
-        enum class ControllerClock : uint8_t
-        {
-            MCP_8MHZ,
-            MCP_16MHZ,
-        };
-
-        ControllerClock clock = ControllerClock::MCP_16MHZ;    // controller clock [Hz]
+        uint32_t oscClock = 16'000'000;    //  External oscillator frequency [Hz]
     };
 
     struct CanMessage
     {
         static constexpr size_t MAX_DATA_LENGTH = 8;
 
-        uint16_t id;                       // message ID (11bit or 29bit)
+        uint32_t id;                       // message ID (11bit or 29bit)
         uint8_t  length;                   // data length (0byte ~ 8byte)
         uint8_t  data[MAX_DATA_LENGTH];    // data
     };
 
 
     /// @brief construct PicoMcp2515 object
-    PicoMcp2515() noexcept {}
+    PicoMcp2515() noexcept
+        : InstructionSet{}
+    {
+    }
 
 
     /// @brief begin CAN and SPI communication
@@ -88,6 +61,10 @@ public:
                const SpiConfig& spiConfig) noexcept
     {
         this->spiConfig = spiConfig;
+
+        InstructionSet::setChannel(spiConfig.channel);
+        InstructionSet::setCs(spiConfig.cs);
+
         // begin SPI communication
         {
             (void)spi_init(/* spi_inst_t* spi      */ spiConfig.channel,
@@ -141,14 +118,160 @@ public:
     /// @brief begin CAN communication only
     /// @note This function is useful when you want to use multiple SPI devices
     /// @note SPI communication must be started by yourself
-    void beginCanOnly(const CanConfig& canConfig,
+    bool beginCanOnly(const CanConfig& canConfig,
                       const SpiConfig& spiConfig) noexcept
     {
         this->spiConfig = spiConfig;
-        attachInterruptParam(/* pin_size_t       pin      */ canConfig.interrupt,
-                             /* voidFuncPtrParam callback */ [](void*) { Serial.println("call"); },
-                             /* PinStatus        mode     */ LOW,
-                             /* void*            param    */ nullptr);
+
+        // MCP2515 Reset
+        {
+            InstructionSet::resetInstruction();
+        }
+
+        //
+        {
+            // CNF1 Register = SJW[2] | BRP[6]
+
+            // Find the BRP with the smallest Tq count
+            const auto nbt     = 1.f / canConfig.baudrate;
+            float      minDiff = FLT_MAX;
+            uint8_t    brp     = 0;
+            uint8_t    tqCount = 0;
+            // uint8_t nbt     = 0;
+            for (uint8_t testBrp = 0; testBrp < 0b111111; ++testBrp)
+            {
+                // Time Quantum (TQ)
+                const auto tq = 2.f * (testBrp + 1) / canConfig.oscClock;
+
+                const auto testTqCount = nbt / tq;
+
+                // Select BRPs near the center that fall within 8 ~ 25
+                if (8 <= testTqCount && testTqCount <= 25)
+                {
+                    constexpr auto center = (8 + 25) / 2.f;
+
+                    const auto diff = abs(testTqCount - center);
+
+                    if (diff < minDiff)
+                    {
+                        minDiff = diff;
+                        brp     = testBrp;
+                        tqCount = testTqCount;
+                    }
+                }
+            }
+            if (minDiff == FLT_MAX)
+            {
+                // not found
+                // TODO: error
+                return false;
+            }
+
+            constexpr uint8_t sjw = 0b00;    // When a crystal oscillator is used, it is usually 1TQ (0b00)
+
+            const uint8_t cnf1 = (sjw << 6) | (brp << 0);
+
+
+            // CNF2 Register = BTLMODE[1] | SAM[1] | PHSEG1[3] | PRSEG[3]
+
+            // Calculate segment times (PS1, PS2)
+            // TqCount = SyncSeg + PropSeg + PS1 + PS2
+            //       samplingPoint (60% ~ 70%) --^
+            constexpr uint8_t syncSeg       = 1;
+            constexpr uint8_t propSeg       = 2;
+            constexpr uint8_t tDelay        = 2;    // 1TQ ~ 2TQ
+            const auto        samplingPoint = tqCount * ((0.6 + 0.7) / 2.f);
+            const uint8_t     ps1           = samplingPoint - syncSeg - propSeg;
+            const uint8_t     ps2           = tqCount - ps1 - syncSeg - propSeg;
+
+            // PS1 & PS2 の範囲をチェック
+            if (propSeg + ps1 < ps2)
+            {
+                // TODO: error
+                Serial.printf("propSeg + ps1 < ps2\n");
+                return false;
+            }
+            if (propSeg + ps1 < tDelay)
+            {
+                // TODO: error
+                Serial.printf("propSeg + ps1 < tDelay\n");
+                return false;
+            }
+            if (ps2 <= sjw)
+            {
+                // TODO: error
+                Serial.printf("propSeg + ps1 < tDelay\n");
+                return false;
+            }
+
+            constexpr uint8_t btlmode = 0b1;
+            constexpr uint8_t sam     = 0b0;            // Bus line sampling count 0: 1 time, 1: 3 times
+            const uint8_t     phseg1  = ps1 - 1;        // Since TQ starts with 1, subtract 1
+            constexpr uint8_t prseg   = propSeg - 1;    // Since TQ starts with 1, subtract 1
+
+            const uint8_t cnf2 = (btlmode << 7) | (sam << 6) | (phseg1 << 3) | (prseg << 0);
+
+
+            // CNF3 Register = SOF[1] | WAKFIL[1] | Uninstalled[3] | PHSEG2[3]
+            constexpr uint8_t sof    = 0b0;        // 0: SOF disabled, 1: SOF enabled（No effect when CANCTRL.CLKEN is 0)
+            constexpr uint8_t wakfil = 0b0;        // 0: Wake-up filter disabled, 1: Wake-up filter enabled
+            const uint8_t     phseg2 = ps2 - 1;    // Since TQ starts with 1, subtract 1
+
+            const uint8_t cnf3 = (sof << 7) | (wakfil << 6) | (phseg2 << 0);
+
+            Serial.printf("cnf1: %02x, cnf2: %02x, cnf3: %02x\n", cnf1, cnf2, cnf3);
+
+
+            const uint8_t transmitData[] = { cnf3, cnf2, cnf1 };    // CNFn registers are in order, so send them at the same time
+            InstructionSet::writeInstruction(Register::CNF3, transmitData, sizeof transmitData);
+        }
+
+        // 通常モードに移行
+        {
+            const bool success = setOperationMode(OperationMode::Normal);
+            
+            if (success);
+            else
+            {
+                Serial.println("setOperationMode failed");
+            }
+
+            return success;
+        }
+    }
+
+    // 動作モード
+    enum class OperationMode : uint8_t
+    {
+        Normal     = 0b000'00000,
+        Sleep      = 0b001'00000,
+        Loopback   = 0b010'00000,
+        ListenOnly = 0b011'00000,
+        Config     = 0b100'00000,
+    };
+
+    template <class T>
+    void printb(const T& v)
+    {
+        unsigned int mask = (int)1 << (sizeof(v) * CHAR_BIT - 1);
+        do
+            Serial.print(mask & v ? '1' : '0');
+        while (mask >>= 1);
+
+        Serial.println();
+    }
+
+
+    bool setOperationMode(OperationMode mode) noexcept
+    {
+        const auto reg  = Register::CANCTRL1;
+        const auto mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
+
+        InstructionSet::bitModifyInstruction(reg, mask, AsUnderlying(mode));
+
+        const uint8_t registerResult = InstructionSet::readInstruction(reg);
+
+        return (registerResult & AsUnderlying(mask)) == AsUnderlying(mode);
     }
 
 
@@ -157,7 +280,17 @@ public:
     void endCanOnly() noexcept {}
 
 
-    void writeMessage(const CanMessage& /*message*/) noexcept {}
+    void writeMessage(const CanMessage& /*message*/) noexcept
+    {
+        // 送信シーケンス
+        // 1. SPI 書き込みコマンドによってレジスタに書く
+        // 2. SPI RTS コマンドによって送信要求を出す
+
+        // TXBnCTRL.TXREQ = 1
+
+        // TXB0CTRL
+        // InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXREQ, RegisterBitmask::TXREQ);
+    }
 
 
     /// @brief Set the receive interrupt handler.
@@ -170,9 +303,7 @@ public:
     }
 
 private:
-    //--------------------------------------------------------------------------------
-    //  Interrupt
-    //--------------------------------------------------------------------------------
+    SpiConfig spiConfig = {};
 
     struct InterruptHandler
     {
@@ -188,465 +319,6 @@ private:
         }
     };
     InterruptHandler interruptHandler = {};
-
-    //--------------------------------------------------------------------------------
-    //  SPI
-    //--------------------------------------------------------------------------------
-
-    SpiConfig spiConfig = {};
-
-
-    //--------------------------------------------------------------------------------
-    //  Register Map
-    //--------------------------------------------------------------------------------
-
-    /// @brief Control Register Map
-    enum class Register : uint8_t
-    {
-        // clang-format off
-
-        /* low  */  /* high       0000                     0001                     0010                     0011                     0100                     0101                     0110                     0111      */
-        /* 0000 */  RXF0SIDH  = 0b0000'0000,  RXF3SIDH = 0b0001'0000,  RXM0SIDH = 0b0010'0000,  TXB0CTRL = 0b0011'0000,  TXB1CTRL = 0b0100'0000,  TXB2CTRL = 0b0101'0000,  RXB0CTRL = 0b0110'0000,  RXB1CTRL = 0b0111'0000,
-        /* 0001 */  RXF0SIDL  = 0b0000'0001,  RXF3SIDL = 0b0001'0001,  RXM0SIDL = 0b0010'0001,  TXB0SIDH = 0b0011'0001,  TXB1SIDH = 0b0100'0001,  TXB2SIDH = 0b0101'0001,  RXB0SIDH = 0b0110'0001,  RXB1SIDH = 0b0111'0001,
-        /* 0010 */  RXF0EID8  = 0b0000'0010,  RXF3EID8 = 0b0001'0010,  RXM0EID8 = 0b0010'0010,  TXB0SIDL = 0b0011'0010,  TXB1SIDL = 0b0100'0010,  TXB2SIDL = 0b0101'0010,  RXB0SIDL = 0b0110'0010,  RXB1SIDL = 0b0111'0010,
-        /* 0011 */  RXF0EID0  = 0b0000'0011,  RXF3EID0 = 0b0001'0011,  RXM0EID0 = 0b0010'0011,  TXB0EID8 = 0b0011'0011,  TXB1EID8 = 0b0100'0011,  TXB2EID8 = 0b0101'0011,  RXB0EID8 = 0b0110'0011,  RXB1EID8 = 0b0111'0011,
-        /* 0100 */  RXF1SIDH  = 0b0000'0100,  RXF4SIDH = 0b0001'0100,  RXM1SIDH = 0b0010'0100,  TXB0EID0 = 0b0011'0100,  TXB1EID0 = 0b0100'0100,  TXB2EID0 = 0b0101'0100,  RXB0EID0 = 0b0110'0100,  RXB1EID0 = 0b0111'0100,
-        /* 0101 */  RXF1SIDL  = 0b0000'0101,  RXF4SIDL = 0b0001'0101,  RXM1SIDL = 0b0010'0101,  TXB0DLC  = 0b0011'0101,  TXB1DLC  = 0b0100'0101,  TXB2DLC  = 0b0101'0101,  RXB0DLC  = 0b0110'0101,  RXB1DLC  = 0b0111'0101,
-        /* 0110 */  RXF1EID8  = 0b0000'0110,  RXF4EID8 = 0b0001'0110,  RXM1EID8 = 0b0010'0110,  TXB0D0   = 0b0011'0110,  TXB1D0   = 0b0100'0110,  TXB2D0   = 0b0101'0110,  RXB0D0   = 0b0110'0110,  RXB1D0   = 0b0111'0110,
-        /* 0111 */  RXF1EID0  = 0b0000'0111,  RXF4EID0 = 0b0001'0111,  RXM1EID0 = 0b0010'0111,  TXB0D1   = 0b0011'0111,  TXB1D1   = 0b0100'0111,  TXB2D1   = 0b0101'0111,  RXB0D1   = 0b0110'0111,  RXB1D1   = 0b0111'0111,
-        /* 1000 */  RXF2SIDH  = 0b0000'1000,  RXF5SIDH = 0b0001'1000,  CNF3     = 0b0010'1000,  TXB0D2   = 0b0011'1000,  TXB1D2   = 0b0100'1000,  TXB2D2   = 0b0101'1000,  RXB0D2   = 0b0110'1000,  RXB1D2   = 0b0111'1000,
-        /* 1001 */  RXF2SIDL  = 0b0000'1001,  RXF5SIDL = 0b0001'1001,  CNF2     = 0b0010'1001,  TXB0D3   = 0b0011'1001,  TXB1D3   = 0b0100'1001,  TXB2D3   = 0b0101'1001,  RXB0D3   = 0b0110'1001,  RXB1D3   = 0b0111'1001,
-        /* 1010 */  RXF2EID8  = 0b0000'1010,  RXF5EID8 = 0b0001'1010,  CNF1     = 0b0010'1010,  TXB0D4   = 0b0011'1010,  TXB1D4   = 0b0100'1010,  TXB2D4   = 0b0101'1010,  RXB0D4   = 0b0110'1010,  RXB1D4   = 0b0111'1010,
-        /* 1011 */  RXF2EID0  = 0b0000'1011,  RXF5EID0 = 0b0001'1011,  CANINTE  = 0b0010'1011,  TXB0D5   = 0b0011'1011,  TXB1D5   = 0b0100'1011,  TXB2D5   = 0b0101'1011,  RXB0D5   = 0b0110'1011,  RXB1D5   = 0b0111'1011,
-        /* 1100 */  BFPCTRL   = 0b0000'1100,  TEC      = 0b0001'1100,  CANINTF  = 0b0010'1100,  TXB0D6   = 0b0011'1100,  TXB1D6   = 0b0100'1100,  TXB2D6   = 0b0101'1100,  RXB0D6   = 0b0110'1100,  RXB1D6   = 0b0111'1100,
-        /* 1101 */  TXRTSCTRL = 0b0000'1101,  REC      = 0b0001'1101,  EFLG     = 0b0010'1101,  TXB0D7   = 0b0011'1101,  TXB1D7   = 0b0100'1101,  TXB2D7   = 0b0101'1101,  RXB0D7   = 0b0110'1101,  RXB1D7   = 0b0111'1101,
-        /* 1110 */  CANSTAT1  = 0b0000'1110,  CANSTAT2 = 0b0001'1110,  CANSTAT3 = 0b0010'1110,  CANSTAT4 = 0b0011'1110,  CANSTAT5 = 0b0100'1110,  CANSTAT6 = 0b0101'1110,  CANSTAT7 = 0b0110'1110,  CANSTAT8 = 0b0111'1110,
-        /* 1111 */  CANCTRL1  = 0b0000'1111,  CANCTRL2 = 0b0001'1111,  CANCTRL3 = 0b0010'1111,  CANCTRL4 = 0b0011'1111,  CANCTRL5 = 0b0100'1111,  CANCTRL6 = 0b0101'1111,  CANCTRL7 = 0b0110'1111,  CANCTRL8 = 0b0111'1111,
-
-        // clang-format on
-    };
-
-
-    /// @brief Control Register Bitmask Map
-    /// @note For registers with bit-by-bit set values
-    enum class RegisterBitmask : uint8_t
-    {
-        // clang-format off
-
-        /* Register  */
-        /* BFPCTRL   */                                                 B1BFS   = 0b0010'0000,  B0BFS   = 0b0001'0000,  B1BFE   = 0b0000'1000,  B0BFE   = 0b0000'0100,  B1BFM   = 0b0000'0010,  B0BFM   = 0b0000'0001,
-        /* TXRTSCTRL */                                                 B2RTS   = 0b0010'0000,  B1RTS   = 0b0001'0000,  B0RTS   = 0b0000'1000,  B2RTSM  = 0b0000'0100,  B1RTSM  = 0b0000'0010,  B0RTSM  = 0b0000'0001,
-        /* CANSTATn  */  OPMOD2  = 0b1000'0000,  OPMOD1 = 0b0100'0000,  OPMOD0  = 0b0010'0000,                          ICOD2   = 0b0000'1000,  ICOD1   = 0b0000'0100,  ICOD0   = 0b0000'0010, 
-        /* CANCTRLn  */  REQOP2  = 0b1000'0000,  REQOP1 = 0b0100'0000,  REQOP0  = 0b0010'0000,  ABAT    = 0b0001'0000,  CLKEN   = 0b0000'1000,  CLKPCE  = 0b0000'0100,  CLKPRE1 = 0b0000'0010,  CLKPRE0 = 0b0000'0001,
-        /* CNF3      */  SOF     = 0b1000'0000,  WAKFIL = 0b0010'0000,                                                                          PHSEG22 = 0b0000'0100,  PHSEG21 = 0b0000'0010,  PHSEG20 = 0b0000'0001,
-        /* CNF2      */  BTLMODE = 0b1000'0000,  SAM    = 0b0100'0000,  PHSEG12 = 0b0010'0000,  PHSEG11 = 0b0001'0000,  PHSEG10 = 0b0000'1000,  PRSEG2  = 0b0000'0100,  PRSEG1  = 0b0000'0010,  PRSEG0  = 0b0000'0001,
-        /* CNF1      */  SJW1    = 0b1000'0000,  SJW0   = 0b0100'0000,  BRP5    = 0b0010'0000,  BRP4    = 0b0001'0000,  BRP3    = 0b0000'1000,  BRP2    = 0b0000'0100,  BRP1    = 0b0000'0010,  BRP0    = 0b0000'0001,
-        /* CANINTE   */  MERRE   = 0b1000'0000,  WAKIE  = 0b0100'0000,  ERRIE   = 0b0010'0000,  TX2IE   = 0b0001'0000,  TX1IE   = 0b0000'1000,  TX0IE   = 0b0000'0100,  RX1IE   = 0b0000'0010,  RX0IE   = 0b0000'0001,
-        /* CANINTF   */  MERRF   = 0b1000'0000,  WAKIF  = 0b0100'0000,  ERRIF   = 0b0010'0000,  TX2IF   = 0b0001'0000,  TX1IF   = 0b0000'1000,  TX0IF   = 0b0000'0100,  RX1IF   = 0b0000'0010,  RX0IF   = 0b0000'0001,
-        /* EFLG      */  RX1OVR  = 0b1000'0000,  RX0OVR = 0b0100'0000,  TXBO    = 0b0010'0000,  TXEP    = 0b0001'0000,  RXEP    = 0b0000'1000,  TXWAR   = 0b0000'0100,  RXWAR   = 0b0000'0010,  EWARN   = 0b0000'0001,
-        /* TXB0CTRL  */                          ABTF   = 0b0100'0000,  MLOA    = 0b0010'0000,  TXERR   = 0b0001'0000,  TXREQ   = 0b0000'1000,                          TXP1    = 0b0000'0010,  TXP0    = 0b0000'0001,
-        /* TXB1CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*      TXP1        */  /*      TXP0        */
-        /* TXB2CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*      TXP1        */  /*      TXP0        */
-        /* RXB0CTRL  */                          RXM1   = 0b0010'0000,  RXM0    = 0b0001'0000,                          RXRTR   = 0b0000'1000,  BUKT0   = 0b0000'0100,  BUKT1   = 0b0000'0010,  FILHIT0 = 0b0000'0001,
-        /* RXB1CTRL  */                          /*      RXM1       */  /*      RXM0        */                          /*      RXRTR       */  FILHIT2 = 0b0000'0100,  FILHIT1 = 0b0000'0010,  /*     FILHIT0      */
-
-        // clang-format on
-    };
-
-    /// @brief Allow bit masks to be combined with the operator|.
-    friend constexpr RegisterBitmask operator|(RegisterBitmask lhs, RegisterBitmask rhs) noexcept
-    {
-        return static_cast<RegisterBitmask>(
-            static_cast<std::underlying_type_t<RegisterBitmask>>(lhs) |
-            static_cast<std::underlying_type_t<RegisterBitmask>>(rhs));
-    }
-
-    /// @brief Transform enum class to underlying type.
-    template <typename Enum>
-    constexpr std::underlying_type_t<Enum> asUnderlying(Enum e) noexcept
-    {
-        return static_cast<std::underlying_type_t<Enum>>(e);
-    }
-
-    //--------------------------------------------------------------------------------
-    //  SPI instruction set
-    //--------------------------------------------------------------------------------
-
-    enum class Instruction : uint8_t
-    {
-        // resetInstruction()
-        Reset = 0b1100'0000,
-
-        // readInstruction()
-        Read = 0b0000'0011,
-
-        // readRxStatusInstruction()
-        ReadStartRXB0SIDH = 0b10010'00'0,
-        ReadStartRXB0D0   = 0b10010'01'0,
-        ReadStartRXB1SIDH = 0b10010'10'0,
-        ReadStartRXB1D0   = 0b10010'11'0,
-
-        // writeInstruction()
-        Write = 0b0000'0010,
-
-        // writeTxBufferInstruction()
-        WriteStartTXB0SIDH = 0b01000'00'0,
-        WriteStartTXB0D0   = 0b01000'01'0,
-        WriteStartTXB1SIDH = 0b01000'10'0,
-        WriteStartTXB1D0   = 0b01000'11'0,
-        WriteStartTXB2SIDH = 0b01001'00'0,
-        WriteStartTXB2D0   = 0b01001'01'0,
-
-        // requestToSendInstruction()
-        RequestToSendTXB0 = 0b10000'001,
-        RequestToSendTXB1 = 0b10000'010,
-        RequestToSendTXB2 = 0b10000'100,
-
-        // readStatusInstruction()
-        ReadStatus = 0b1010'0000,
-
-        // readRxStatusInstruction()
-        ReadRxStatus = 0b1011'0000,
-
-        // bitModifyInstruction()
-        BitModify = 0b0000'0101,
-    };
-
-
-    /// @brief Internal register initialization
-    /// @note After initialization, it will be in configuration mode.
-    /// @note Data sheet: p63 12.2
-    inline void resetInstruction() noexcept
-    {
-        // SPI transmit data (1byte): [instruction]
-        // SPI receive  data (0byte):
-
-        const uint8_t instruction = asUnderlying(Instruction::Reset);
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    /// @brief Read 1 byte at a time 'in order from' the selected register
-    /// @note Data sheet: p63 12.3
-    inline void readInstruction(Register startAddress, uint8_t* dist, size_t length) noexcept
-    {
-        // SPI transmit data (2byte): [instruction] + [startAddress]
-        // SPI receive  data (nbyte): [startAddress data] + [startAddress + 1 data] + ... (until CS is high)
-
-        const uint8_t data[] = {
-            asUnderlying(Instruction::Read),
-            asUnderlying(startAddress),
-        };
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ data,
-                           /* size_t         len */ sizeof data);
-
-        spi_read_blocking(/* spi_inst_t* spi              */ spiConfig.channel,
-                          /* uint8_t     repeated_tx_data */ 0x00,
-                          /* uint8_t*    dst              */ dist,
-                          /* size_t      len              */ length);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    /// @brief Read 1 byte at a time 'in order from' the selected register (For RX buffer register)
-    /// @param startAddress register (RXB0SIDH, RXB1SIDH, RXB0D0, RXB1D0 only valid)
-    /// @note Data sheet: p63 12.4
-    /// @note Compared to instructionRead, the number of bytes sent is reduced and speed is improved by including register selection bits in the instruction.
-    inline void readRxBufferInstruction(Register startAddress, uint8_t* dist, size_t length) noexcept
-    {
-        // SPI transmit data (1byte): [instruction | startAddress(2bit)]
-        // SPI receive  data (nbyte): [startAddress data] + [startAddress + 1 data] + ... (until CS is high)
-
-        uint8_t instruction;
-        switch (startAddress)
-        {
-        case Register::RXB0SIDH: instruction = asUnderlying(Instruction::ReadStartRXB0SIDH); break;
-        case Register::RXB1SIDH: instruction = asUnderlying(Instruction::ReadStartRXB1SIDH); break;
-        case Register::RXB0D0: instruction = asUnderlying(Instruction::ReadStartRXB0D0); break;
-        case Register::RXB1D0: instruction = asUnderlying(Instruction::ReadStartRXB1D0); break;
-        default: return;
-        }
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        spi_read_blocking(/* spi_inst_t* spi              */ spiConfig.channel,
-                          /* uint8_t     repeated_tx_data */ 0x00,
-                          /* uint8_t*    dst              */ dist,
-                          /* size_t      len              */ length);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    /// @brief Write 1 byte at a time 'in order from' the selected register
-    /// @note Data sheet: p63 12.5
-    inline void writeInstruction(Register startAddress, uint8_t const* src, size_t length) noexcept
-    {
-        // SPI transmit data (1byte): [instruction] + [startAddress] + [data] + [data] + ...
-        // SPI receive  data (0byte): []
-
-        const uint8_t data[] = {
-            asUnderlying(Instruction::Write),
-            asUnderlying(startAddress),
-        };
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ data,
-                           /* size_t         len */ sizeof data);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ src,
-                           /* size_t         len */ length);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    /// @brief Write 1 byte at a time 'in order from' the selected register (For TX buffer register)
-    /// @param address register (TXB0SIDH, TXB1SIDH, TXB2SIDH, TXB0D0, TXB1D0, TXB2D0 only valid)
-    /// @note Data sheet: p63 12.6
-    /// @note Compared to instructionRead, the number of bytes sent is reduced and speed is improved by including register selection bits in the instruction.
-    inline void writeTxBufferInstruction(Register startAddress, uint8_t const* src, size_t length) noexcept
-    {
-        // SPI transmit data (1byte): [instruction | startAddress(3bit)] + [data] + [data] + ...
-        // SPI receive  data (0byte): []
-
-        uint8_t instruction;
-        switch (startAddress)
-        {
-        case Register::TXB0SIDH: instruction = asUnderlying(Instruction::WriteStartTXB0SIDH); break;
-        case Register::TXB1SIDH: instruction = asUnderlying(Instruction::WriteStartTXB1SIDH); break;
-        case Register::TXB2SIDH: instruction = asUnderlying(Instruction::WriteStartTXB2SIDH); break;
-        case Register::TXB0D0: instruction = asUnderlying(Instruction::WriteStartTXB0D0); break;
-        case Register::TXB1D0: instruction = asUnderlying(Instruction::WriteStartTXB1D0); break;
-        case Register::TXB2D0: instruction = asUnderlying(Instruction::WriteStartTXB2D0); break;
-        default: return;
-        }
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ src,
-                           /* size_t         len */ length);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    enum class TxBuffer
-    {
-        TXB0,
-        TXB1,
-        TXB2,
-    };
-
-    /// @brief 送信要求
-    /// @param txBuffer 送信バッファ
-    /// @note Data sheet: p63 12.7
-    inline void requestToSendInstruction(TxBuffer txBuffer) noexcept
-    {
-        // SPI transmit data (1byte): [instruction | txBuffer(3bit)]
-        // SPI receive  data (0byte): []
-
-        uint8_t instruction;
-        switch (txBuffer)
-        {
-        case TxBuffer::TXB0: instruction = asUnderlying(Instruction::RequestToSendTXB0); break;
-        case TxBuffer::TXB1: instruction = asUnderlying(Instruction::RequestToSendTXB1); break;
-        case TxBuffer::TXB2: instruction = asUnderlying(Instruction::RequestToSendTXB2); break;
-        default: return;
-        }
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        gpio_put(spiConfig.cs, true);
-    }
-
-    struct PartialStatus
-    {
-        bool CANINTF_RX0IF : 1;
-        bool CANINTFL_RX1IF : 1;
-        bool TXB0CNTRL_TXREQ : 1;
-        bool CANINTF_TX0IF : 1;
-        bool TXB1CNTRL_TXREQ : 1;
-        bool CANINTF_TX1IF : 1;
-        bool TXB2CNTRL_TXREQ : 1;
-        bool CANINTF_TX2IF : 1;
-    };
-
-    /// @brief 部分的な状態読み込み
-    /// @note Data sheet: p64 12.8
-    inline PartialStatus readStatusInstruction() noexcept
-    {
-        // SPI transmit data (1byte): [instruction]
-        // SPI receive  data (1byte): [status] ... (same data until CS is high)
-
-        const uint8_t instruction = asUnderlying(Instruction::ReadStatus);
-
-        uint8_t status{};
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        spi_read_blocking(/* spi_inst_t* spi              */ spiConfig.channel,
-                          /* uint8_t     repeated_tx_data */ 0x00,
-                          /* uint8_t*    dst              */ &status,
-                          /* size_t      len              */ sizeof status);
-
-        gpio_put(spiConfig.cs, true);
-
-        return {
-            .CANINTF_RX0IF   = (status >> 0) & 0b1,
-            .CANINTFL_RX1IF  = (status >> 1) & 0b1,
-            .TXB0CNTRL_TXREQ = (status >> 2) & 0b1,
-            .CANINTF_TX0IF   = (status >> 3) & 0b1,
-            .TXB1CNTRL_TXREQ = (status >> 4) & 0b1,
-            .CANINTF_TX1IF   = (status >> 5) & 0b1,
-            .TXB2CNTRL_TXREQ = (status >> 6) & 0b1,
-            .CANINTF_TX2IF   = (status >> 7) & 0b1,
-        };
-    }
-
-    struct RxStatus
-    {
-        enum class MessageBuffer : uint8_t
-        {
-            NONE,
-            RXB0,
-            RXB1,
-            BOTH,
-        } messageBuffer;
-
-        enum class MessageType : uint8_t
-        {
-            StandardData,
-            StandardRemote,
-            ExtendedData,
-            ExtendedRemote,
-        } messageType;
-
-        enum class FilterMatch : uint8_t
-        {
-            RXF0,
-            RXF1,
-            RXF2,
-            RXF3,
-            RXF4,
-            RXF5,
-            RXF0Forwarded,    // RXB0に転送
-            RXF1Forwarded,    // RXB1に転送
-        } filterMatch;
-    };
-
-    /// @brief RX状態読み込み
-    /// @note Data sheet: p64 12.9
-    inline RxStatus readRxStatusInstruction() noexcept
-    {
-        // SPI transmit data (1byte): [instruction]
-        // SPI receive  data (1byte): [status] ... (same data until CS is high)
-
-        const uint8_t instruction = asUnderlying(Instruction::ReadRxStatus);
-
-        uint8_t status{};
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ &instruction,
-                           /* size_t         len */ sizeof instruction);
-
-        spi_read_blocking(/* spi_inst_t* spi              */ spiConfig.channel,
-                          /* uint8_t     repeated_tx_data */ 0x00,
-                          /* uint8_t*    dst              */ &status,
-                          /* size_t      len              */ sizeof status);
-
-        gpio_put(spiConfig.cs, true);
-
-        // status: [7-6] Message Buffer, [4-3] Message Type, [2-0] Filter Match
-
-        RxStatus::MessageBuffer messageBuffer;
-        switch ((status >> 6) & 0b11)
-        {
-        case 0b00: messageBuffer = RxStatus::MessageBuffer::NONE; break;
-        case 0b01: messageBuffer = RxStatus::MessageBuffer::RXB0; break;
-        case 0b10: messageBuffer = RxStatus::MessageBuffer::RXB1; break;
-        case 0b11: messageBuffer = RxStatus::MessageBuffer::BOTH; break;
-        default: return {};    // unreachable
-        }
-
-        RxStatus::MessageType messageType;
-        switch ((status >> 3) & 0b11)
-        {
-        case 0b00: messageType = RxStatus::MessageType::StandardData; break;
-        case 0b01: messageType = RxStatus::MessageType::StandardRemote; break;
-        case 0b10: messageType = RxStatus::MessageType::ExtendedData; break;
-        case 0b11: messageType = RxStatus::MessageType::ExtendedRemote; break;
-        default: return {};    // unreachable
-        }
-
-        RxStatus::FilterMatch filterMatch;
-        switch (status & 0b111)
-        {
-        case 0b000: filterMatch = RxStatus::FilterMatch::RXF0; break;
-        case 0b001: filterMatch = RxStatus::FilterMatch::RXF1; break;
-        case 0b010: filterMatch = RxStatus::FilterMatch::RXF2; break;
-        case 0b011: filterMatch = RxStatus::FilterMatch::RXF3; break;
-        case 0b100: filterMatch = RxStatus::FilterMatch::RXF4; break;
-        case 0b101: filterMatch = RxStatus::FilterMatch::RXF5; break;
-        case 0b110: filterMatch = RxStatus::FilterMatch::RXF0Forwarded; break;
-        case 0b111: filterMatch = RxStatus::FilterMatch::RXF1Forwarded; break;
-        default: return {};    // unreachable
-        }
-
-        return { messageBuffer, messageType, filterMatch };
-    }
-
-    /// @brief ビット変更
-    /// @note Data sheet: p64 12.10
-    inline void bitModifyInstruction(Register address, RegisterBitmask mask, RegisterBitmask data) noexcept
-    {
-        // SPI transmit data (4byte): [instruction] + [address] + [mask] + [data]
-        // SPI receive  data (0byte): []
-
-        const uint8_t data[] = {
-            asUnderlying(Instruction::BitModify),
-            asUnderlying(address),
-            asUnderlying(mask),
-            asUnderlying(data),
-        };
-
-        gpio_put(spiConfig.cs, false);
-
-        spi_write_blocking(/* spi_inst_t*    spi */ spiConfig.channel,
-                           /* const uint8_t* src */ data,
-                           /* size_t         len */ sizeof data);
-
-        gpio_put(spiConfig.cs, true);
-    }
 };
 
 // #include "PicoMCP2515Impl.hpp"
