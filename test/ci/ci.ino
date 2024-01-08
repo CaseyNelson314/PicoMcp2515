@@ -1,3 +1,4 @@
+#define DEV_MODE
 #include <PicoMcp2515.hpp>
 
 static PicoMcp2515 mcp2515;
@@ -32,6 +33,7 @@ void setup()
     mcp2515.writeMessage(message);
 
     const auto readMessage = mcp2515.readMessage();
+    (void)readMessage;
 }
 
 void loop()
