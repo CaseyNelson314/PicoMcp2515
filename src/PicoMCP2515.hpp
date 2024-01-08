@@ -32,7 +32,7 @@ public:
 
     struct CanConfig
     {
-        uint8_t interrupt;    // Receive interrupt pin
+        // uint8_t interrupt;    // Receive interrupt pin
 
         uint32_t baudrate = 1'000'000;    // CAN bus baudrate [bps]
 
@@ -300,6 +300,11 @@ public:
     void onReceive(void (*callback)(const CanMessage&, void*), void* param = nullptr) noexcept
     {
         interruptHandler = { callback, param };
+    }
+
+    CanMessage readMessage() const noexcept
+    {
+        return {};
     }
 
 private:
