@@ -1,4 +1,4 @@
-#pragma once
+#include <PicoMcp2515.hpp>
 
 static PicoMcp2515 mcp2515;
 
