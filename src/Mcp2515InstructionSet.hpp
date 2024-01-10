@@ -81,9 +81,9 @@ public:
         /* CANINTE   */  MERRE   = 0b1000'0000,  WAKIE  = 0b0100'0000,  ERRIE   = 0b0010'0000,  TX2IE   = 0b0001'0000,  TX1IE   = 0b0000'1000,  TX0IE   = 0b0000'0100,  RX1IE   = 0b0000'0010,  RX0IE   = 0b0000'0001,
         /* CANINTF   */  MERRF   = 0b1000'0000,  WAKIF  = 0b0100'0000,  ERRIF   = 0b0010'0000,  TX2IF   = 0b0001'0000,  TX1IF   = 0b0000'1000,  TX0IF   = 0b0000'0100,  RX1IF   = 0b0000'0010,  RX0IF   = 0b0000'0001,
         /* EFLG      */  RX1OVR  = 0b1000'0000,  RX0OVR = 0b0100'0000,  TXBO    = 0b0010'0000,  TXEP    = 0b0001'0000,  RXEP    = 0b0000'1000,  TXWAR   = 0b0000'0100,  RXWAR   = 0b0000'0010,  EWARN   = 0b0000'0001,
-        /* TXB0CTRL  */                          ABTF   = 0b0100'0000,  MLOA    = 0b0010'0000,  TXERR   = 0b0001'0000,  TXREQ   = 0b0000'1000,                          TXP1    = 0b0000'0010,  TXP0    = 0b0000'0001,
-        /* TXB1CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*      TXP1        */  /*      TXP0        */
-        /* TXB2CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*      TXP1        */  /*      TXP0        */
+        /* TXB0CTRL  */                          ABTF   = 0b0100'0000,  MLOA    = 0b0010'0000,  TXERR   = 0b0001'0000,  TXREQ   = 0b0000'1000,                          TXP     = 0b0000'0011,  /*       TXP        */
+        /* TXB1CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*       TXP        */  /*       TXP        */
+        /* TXB2CTRL  */                          /*      ABTF       */  /*      MLOA        */  /*      TXERR       */  /*      TXREQ       */                          /*       TXP        */  /*       TXP        */
         /* RXB0CTRL  */                          RXM1   = 0b0010'0000,  RXM0    = 0b0001'0000,                          RXRTR   = 0b0000'1000,  BUKT0   = 0b0000'0100,  BUKT1   = 0b0000'0010,  FILHIT0 = 0b0000'0001,
         /* RXB1CTRL  */                          /*      RXM1       */  /*      RXM0        */                          /*      RXRTR       */  FILHIT2 = 0b0000'0100,  FILHIT1 = 0b0000'0010,  /*     FILHIT0      */
 
