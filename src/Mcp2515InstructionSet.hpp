@@ -94,9 +94,7 @@ public:
     /// @brief Allow bit masks to be combined with the operator|.
     friend constexpr RegisterBitmask operator|(RegisterBitmask lhs, RegisterBitmask rhs) noexcept
     {
-        return static_cast<RegisterBitmask>(
-            static_cast<std::underlying_type_t<RegisterBitmask>>(lhs) |
-            static_cast<std::underlying_type_t<RegisterBitmask>>(rhs));
+        return static_cast<RegisterBitmask>(AsUnderlying(lhs) | AsUnderlying(rhs));
     }
 
     /// @brief Transform enum class to underlying type.

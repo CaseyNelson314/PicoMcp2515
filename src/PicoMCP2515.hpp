@@ -286,24 +286,16 @@ public:
     {
         constexpr uint8_t rtr = 0b0;    // 0: Data frame, 1: Remote frame
 
-        const uint8_t transmitData[] = {
-            static_cast<uint8_t>(message.id >> 3),                                                           // ID[10:3]
-            static_cast<uint8_t>(message.id << 5 | (static_cast<uint8_t>(message.extended) << 3) | 0b00),    // ID[2:0] | EXIDE | EID[17:16]
-            0x00,                                                                                            // EID[15:8]
-            0x00,                                                                                            // EID[7:0]
-            static_cast<uint8_t>(rtr << 6 | (message.length & 0b1111)),                                      // RTR | DLC[3:0]
-            message.data[0],
-            message.data[1],
-            message.data[2],
-            message.data[3],
-            message.data[4],
-            message.data[5],
-            message.data[6],
-            message.data[7],
-        };
+        uint8_t transmitData[13];
+        transmitData[0] = static_cast<uint8_t>(message.id >> 3);                                                           // ID[10:3]
+        transmitData[1] = static_cast<uint8_t>(message.id << 5 | (static_cast<uint8_t>(message.extended) << 3) | 0b00);    // ID[2:0] | EXIDE | EID[17:16]
+        transmitData[2] = 0x00;                                                                                            // EID[15:8]
+        transmitData[3] = 0x00;                                                                                            // EID[7:0]
+        transmitData[4] = static_cast<uint8_t>(rtr << 6 | (message.length & 0b1111));                                      // RTR | DLC[3:0]
+        memcpy(&transmitData[5], message.data, message.length);
 
         //
-        InstructionSet::writeTxBufferInstruction(Register::TXB0SIDH, transmitData, sizeof transmitData - CanMessage::MAX_DATA_LENGTH + message.length);
+        InstructionSet::writeTxBufferInstruction(Register::TXB0SIDH, transmitData, 5 + message.length);
 
         // TXB0CTRL.TXREQ を立てる
         InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXREQ, AsUnderlying(RegisterBitmask::TXREQ));
@@ -313,9 +305,6 @@ public:
 
         const uint8_t registerResult = InstructionSet::readInstruction(Register::TXB0CTRL);
 
-        Serial.printf("TXB0CTRL: ");
-        printb(registerResult);
-        
         if (registerResult | AsUnderlying(RegisterBitmask::ABTF | RegisterBitmask::MLOA | RegisterBitmask::TXERR | RegisterBitmask::TXREQ))
         {
             return false;
