@@ -43,9 +43,10 @@ public:
     {
         static constexpr size_t MAX_DATA_LENGTH = 8;
 
-        uint32_t id;                       // message ID (11bit or 29bit)
-        uint8_t  length;                   // data length (0byte ~ 8byte)
-        uint8_t  data[MAX_DATA_LENGTH];    // data
+        uint32_t id;                            // message ID (standard:11bit or extended:29bit)
+        bool     extended = false;              // extended ID flag
+        uint8_t  length   = MAX_DATA_LENGTH;    // data length (0byte ~ 8byte)
+        uint8_t  data[MAX_DATA_LENGTH];         // data
     };
 
 
@@ -110,7 +111,7 @@ public:
 
         // end SPI communication
         {
-            // spi_deinit(/* spi_inst_t* spi */ channel);
+            spi_deinit(/* spi_inst_t* spi */ spiConfig.channel);
         }
     }
 
@@ -219,8 +220,6 @@ public:
 
             const uint8_t cnf3 = (sof << 7) | (wakfil << 6) | (phseg2 << 0);
 
-            Serial.printf("cnf1: %02x, cnf2: %02x, cnf3: %02x\n", cnf1, cnf2, cnf3);
-
 
             const uint8_t transmitData[] = { cnf3, cnf2, cnf1 };    // CNFn registers are in order, so send them at the same time
             InstructionSet::writeInstruction(Register::CNF3, transmitData, sizeof transmitData);
@@ -228,23 +227,28 @@ public:
 
         // 通常モードに移行
         {
-            const bool success = setOperationMode(OperationMode::Normal);
-            
-            if (success);
-            else
+            if (not setOperationMode(OperationMode::Normal))
             {
-                Serial.println("setOperationMode failed");
+                return false;
             }
-
-            return success;
         }
+
+        // 割り込み許可の設定
+        {
+            // 送信割り込み禁止
+            // InstructionSet::bitModifyInstruction(Register::CANINTE,
+            //                                      RegisterBitmask::TX0IE | RegisterBitmask::TX1IE | RegisterBitmask::TX2IE,
+            //                                      0b00000);
+        }
+
+        return true;
     }
 
     // 動作モード
     enum class OperationMode : uint8_t
     {
-        Normal     = 0b000'00000,
-        Sleep      = 0b001'00000,
+        Normal = 0b000'00000,
+        // Sleep      = 0b001'00000,  // ウェイクアップ機能未実装
         Loopback   = 0b010'00000,
         ListenOnly = 0b011'00000,
         Config     = 0b100'00000,
@@ -261,15 +265,13 @@ public:
         Serial.println();
     }
 
-
     bool setOperationMode(OperationMode mode) noexcept
     {
-        const auto reg  = Register::CANCTRL1;
-        const auto mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
+        const RegisterBitmask mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
 
-        InstructionSet::bitModifyInstruction(reg, mask, AsUnderlying(mode));
+        InstructionSet::bitModifyInstruction(Register::CANCTRL1, mask, AsUnderlying(mode));
 
-        const uint8_t registerResult = InstructionSet::readInstruction(reg);
+        const uint8_t registerResult = InstructionSet::readInstruction(Register::CANSTAT1);
 
         return (registerResult & AsUnderlying(mask)) == AsUnderlying(mode);
     }
@@ -280,16 +282,45 @@ public:
     void endCanOnly() noexcept {}
 
 
-    void writeMessage(const CanMessage& /*message*/) noexcept
+    bool writeMessage(const CanMessage& message) noexcept
     {
-        // 送信シーケンス
-        // 1. SPI 書き込みコマンドによってレジスタに書く
-        // 2. SPI RTS コマンドによって送信要求を出す
+        constexpr uint8_t rtr = 0b0;    // 0: Data frame, 1: Remote frame
 
-        // TXBnCTRL.TXREQ = 1
+        const uint8_t transmitData[] = {
+            static_cast<uint8_t>(message.id >> 3),                                                           // ID[10:3]
+            static_cast<uint8_t>(message.id << 5 | (static_cast<uint8_t>(message.extended) << 3) | 0b00),    // ID[2:0] | EXIDE | EID[17:16]
+            0x00,                                                                                            // EID[15:8]
+            0x00,                                                                                            // EID[7:0]
+            static_cast<uint8_t>(rtr << 6 | (message.length & 0b1111)),                                      // RTR | DLC[3:0]
+            message.data[0],
+            message.data[1],
+            message.data[2],
+            message.data[3],
+            message.data[4],
+            message.data[5],
+            message.data[6],
+            message.data[7],
+        };
 
-        // TXB0CTRL
-        // InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXREQ, RegisterBitmask::TXREQ);
+        //
+        InstructionSet::writeTxBufferInstruction(Register::TXB0SIDH, transmitData, sizeof transmitData - CanMessage::MAX_DATA_LENGTH + message.length);
+
+        // TXB0CTRL.TXREQ を立てる
+        InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXREQ, AsUnderlying(RegisterBitmask::TXREQ));
+
+        // 送信要求
+        InstructionSet::requestToSendInstruction(TxBuffer::TXB0);
+
+        const uint8_t registerResult = InstructionSet::readInstruction(Register::TXB0CTRL);
+
+        Serial.printf("TXB0CTRL: ");
+        printb(registerResult);
+        
+        if (registerResult | AsUnderlying(RegisterBitmask::ABTF | RegisterBitmask::MLOA | RegisterBitmask::TXERR | RegisterBitmask::TXREQ))
+        {
+            return false;
+        }
+        return true;
     }
 
 
