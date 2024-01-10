@@ -48,9 +48,5 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install ${{ matrix.board.platform }}
 
-      - name: Install libraries
-        run: |
-          arduino-cli lib install --git-url https://github.com/CaseyNelson314/PicoMCP2515.git
-
       - name: Run test
-        run: arduino-cli compile -b ${{ matrix.board.fqbn }} ./test/ci/ci.ino
+        run: arduino-cli compile --library . -b ${{ matrix.board.fqbn }} ./test/ci/ci.ino
