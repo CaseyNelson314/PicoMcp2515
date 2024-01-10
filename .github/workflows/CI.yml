@@ -1,0 +1,52 @@
+#
+#    CI
+#
+#    Copyright (c) 2024 Okawa Yusuke
+#
+
+name: CI
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  CI:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # all jobs should run
+      matrix:
+        board:
+          - fqbn: rp2040:rp2040:rpipico
+            platform: rp2040:rp2040
+            url: https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s 0.34.0
+          echo "./bin" >> $GITHUB_PATH
+
+      - name: Install board
+        run: |
+          arduino-cli config init
+          arduino-cli config set library.enable_unsafe_install true
+          if [ -n "${{ matrix.board.url }}" ]; then
+            arduino-cli config add board_manager.additional_urls ${{ matrix.board.url }}
+          fi
+          arduino-cli core update-index
+          arduino-cli core install ${{ matrix.board.platform }}
+
+      - name: Run test
+        run: arduino-cli compile --library . -b ${{ matrix.board.fqbn }} ./test/ci/ci.ino
