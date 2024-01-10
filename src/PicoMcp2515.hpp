@@ -43,9 +43,11 @@ public:
     {
         static constexpr size_t MAX_DATA_LENGTH = 8;
 
-        uint32_t id;                       // message ID (11bit or 29bit)
-        uint8_t  length;                   // data length (0byte ~ 8byte)
-        uint8_t  data[MAX_DATA_LENGTH];    // data
+        uint32_t id;                            // message ID (standard:11bit or extended:29bit)
+        bool     extended = false;              // extended ID flag
+        bool     remote   = false;              // remote frame flag
+        size_t   length   = MAX_DATA_LENGTH;    // data length (0byte ~ 8byte)
+        uint8_t  data[MAX_DATA_LENGTH];         // data
     };
 
 
@@ -110,7 +112,7 @@ public:
 
         // end SPI communication
         {
-            // spi_deinit(/* spi_inst_t* spi */ channel);
+            spi_deinit(/* spi_inst_t* spi */ spiConfig.channel);
         }
     }
 
@@ -180,7 +182,7 @@ public:
             constexpr uint8_t syncSeg       = 1;
             constexpr uint8_t propSeg       = 2;
             constexpr uint8_t tDelay        = 2;    // 1TQ ~ 2TQ
-            const auto        samplingPoint = tqCount * ((0.6 + 0.7) / 2.f);
+            const float       samplingPoint = tqCount * ((0.6f + 0.7f) / 2.f);
             const uint8_t     ps1           = samplingPoint - syncSeg - propSeg;
             const uint8_t     ps2           = tqCount - ps1 - syncSeg - propSeg;
 
@@ -219,8 +221,6 @@ public:
 
             const uint8_t cnf3 = (sof << 7) | (wakfil << 6) | (phseg2 << 0);
 
-            Serial.printf("cnf1: %02x, cnf2: %02x, cnf3: %02x\n", cnf1, cnf2, cnf3);
-
 
             const uint8_t transmitData[] = { cnf3, cnf2, cnf1 };    // CNFn registers are in order, so send them at the same time
             InstructionSet::writeInstruction(Register::CNF3, transmitData, sizeof transmitData);
@@ -228,48 +228,40 @@ public:
 
         // 通常モードに移行
         {
-            const bool success = setOperationMode(OperationMode::Normal);
-            
-            if (success);
-            else
+            if (not setOperationMode(OperationMode::Normal))
             {
-                Serial.println("setOperationMode failed");
+                return false;
             }
-
-            return success;
         }
+
+        // 送信バッファの優先順位を設定
+        {
+            // Transmit priority: TXB0 < TXB1 < TXB2 (To send older data first. Data is set from TXB0)
+            InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXP, 0b0000'0000);
+            InstructionSet::bitModifyInstruction(Register::TXB1CTRL, RegisterBitmask::TXP, 0b0000'0001);
+            InstructionSet::bitModifyInstruction(Register::TXB2CTRL, RegisterBitmask::TXP, 0b0000'0010);
+        }
+
+        return true;
     }
 
     // 動作モード
     enum class OperationMode : uint8_t
     {
-        Normal     = 0b000'00000,
-        Sleep      = 0b001'00000,
+        Normal = 0b000'00000,
+        // Sleep      = 0b001'00000,  // ウェイクアップ機能未実装
         Loopback   = 0b010'00000,
         ListenOnly = 0b011'00000,
         Config     = 0b100'00000,
     };
 
-    template <class T>
-    void printb(const T& v)
-    {
-        unsigned int mask = (int)1 << (sizeof(v) * CHAR_BIT - 1);
-        do
-            Serial.print(mask & v ? '1' : '0');
-        while (mask >>= 1);
-
-        Serial.println();
-    }
-
-
     bool setOperationMode(OperationMode mode) noexcept
     {
-        const auto reg  = Register::CANCTRL1;
-        const auto mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
+        const RegisterBitmask mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
 
-        InstructionSet::bitModifyInstruction(reg, mask, AsUnderlying(mode));
+        InstructionSet::bitModifyInstruction(Register::CANCTRL1, mask, AsUnderlying(mode));
 
-        const uint8_t registerResult = InstructionSet::readInstruction(reg);
+        const uint8_t registerResult = InstructionSet::readInstruction(Register::CANSTAT1);
 
         return (registerResult & AsUnderlying(mask)) == AsUnderlying(mode);
     }
@@ -280,16 +272,128 @@ public:
     void endCanOnly() noexcept {}
 
 
-    void writeMessage(const CanMessage& /*message*/) noexcept
+    /// @brief write CAN message
+    /// @param message CAN message
+    bool writeMessage(const CanMessage& message) noexcept
     {
-        // 送信シーケンス
-        // 1. SPI 書き込みコマンドによってレジスタに書く
-        // 2. SPI RTS コマンドによって送信要求を出す
+        // Check message arguments
+        if (message.length > CanMessage::MAX_DATA_LENGTH)
+        {
+            // error: data length is too long
+            return false;
+        }
+        if (message.extended)
+        {
+            if (message.id > 0x1FFFFFFF)    // 29bit
+            {
+                // error: extended ID is too long
+                return false;
+            }
+        }
+        else
+        {
+            if (message.id > 0x7FF)    // 11bit
+            {
+                // error: standard ID is too long
+                return false;
+            }
+        }
+        if (message.remote)
+        {
+            if (message.length > 0)
+            {
+                // error: remote frame must be 0 length
+                return false;
+            }
+        }
+        else
+        {
+            if (message.length == 0)
+            {
+                // error: data frame must be 1 ~ 8 length
+                return false;
+            }
+        }
 
-        // TXBnCTRL.TXREQ = 1
 
-        // TXB0CTRL
-        // InstructionSet::bitModifyInstruction(Register::TXB0CTRL, RegisterBitmask::TXREQ, RegisterBitmask::TXREQ);
+        // Determine the TX buffer to be used for transmission
+        const auto status = InstructionSet::readStatusInstruction();
+        TxBuffer   TXBn;
+        Register   TXBnSIDH;
+        Register   TXBnCTRL;
+        if (not status.TXB0CNTRL_TXREQ)
+        {
+            // status.TXBnCNTRL_TXREQ == false: TXBn is free
+            TXBn     = TxBuffer::TXB0;
+            TXBnSIDH = Register::TXB0SIDH;
+            TXBnCTRL = Register::TXB0CTRL;
+        }
+        else if (not status.TXB1CNTRL_TXREQ)
+        {
+            TXBn     = TxBuffer::TXB1;
+            TXBnSIDH = Register::TXB1SIDH;
+            TXBnCTRL = Register::TXB1CTRL;
+        }
+        else if (not status.TXB2CNTRL_TXREQ)
+        {
+            TXBn     = TxBuffer::TXB2;
+            TXBnSIDH = Register::TXB2SIDH;
+            TXBnCTRL = Register::TXB2CTRL;
+        }
+        else
+        {
+            // Transmission buffer is not free.
+            return false;
+        }
+
+
+        uint8_t transmitData[13];
+        if (message.extended)
+        {
+            // uint8_t message
+            return false;    // TODO: not implemented
+        }
+        else
+        {
+            const uint8_t idh   = static_cast<uint8_t>(message.id >> 3);          // ID[10:3]
+            const uint8_t idl   = static_cast<uint8_t>(message.id << 5);          // ID[2:0]
+            const uint8_t exide = static_cast<uint8_t>(message.extended << 3);    // 0: Standard frame, 1: Extended frame
+
+            transmitData[0] = idh;
+            transmitData[1] = idl | exide;
+        }
+
+        const uint8_t rtr = static_cast<uint8_t>(message.remote << 6);    // 0: Data frame, 1: Remote frame
+        const uint8_t dlc = static_cast<uint8_t>(message.length << 0);    // Data length code
+
+        transmitData[4] = rtr | dlc;
+
+        if (not message.remote)
+        {
+            memcpy(&transmitData[5], message.data, message.length);
+        }
+
+        // Write data to TX buffer
+        InstructionSet::writeTxBufferInstruction(TXBnSIDH, transmitData, 5 + message.length);
+
+        // transmit request
+        InstructionSet::requestToSendInstruction(TXBn);
+
+        const uint8_t transmitResult = InstructionSet::readInstruction(TXBnCTRL);
+
+        if (transmitResult & AsUnderlying(RegisterBitmask::MLOA))
+        {
+            // error: Arbitration lost (other nodes on the bus are transmitting)
+            return false;
+        }
+
+        if (transmitResult & AsUnderlying(RegisterBitmask::TXERR))
+        {
+            // error: Bus error occurred during message transmission.
+            return false;
+        }
+
+        return true;
     }
 
 
