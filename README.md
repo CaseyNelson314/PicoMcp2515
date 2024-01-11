@@ -1,14 +1,11 @@
-<div align=center>
-
 # PicoMcp2515 [![CI](https://github.com/CaseyNelson314/PicoMcp2515/actions/workflows/CI.yml/badge.svg)](https://github.com/CaseyNelson314/PicoMcp2515/actions/workflows/CI.yml)
+
+> [!CAUTION]
+> Currently under development in the develop branch.
 
 MCP2515 (CAN Controller) Library for Raspberry Pi Pico
 
-Currently under development in the develop branch
-
 ![ojigi_animal_inu](https://github.com/CaseyNelson314/PicoMCP2515/assets/91818705/99f06205-bf15-4401-8a79-5c7d85ddc217)
-
-</div>
 
 ## Usage
 
