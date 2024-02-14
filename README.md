@@ -7,51 +7,27 @@ MCP2515 (CAN Controller) Library for Raspberry Pi Pico
 
 ![ojigi_animal_inu](https://github.com/CaseyNelson314/PicoMCP2515/assets/91818705/99f06205-bf15-4401-8a79-5c7d85ddc217)
 
-## Usage
+## Target code
+
+### Transmitter
 
 ```cpp
 #include <PicoMcp2515.hpp>
 
-static PicoMcp2515 mcp;
+static PicoMcp2515 mcp {
+    .csPin = 0,
+    ...
+    .baudrate = 1'000'000,
+    .oscClock = 16'000'000
+};
 
 void setup()
 {
-    // Construct setting structure
-
-    PicoMcp2515::CanConfig canConfig {
-        .baudrate = 1'000'000,
-        .oscClock = 16'000'000
-    };
-
-    PicoMcp2515::SpiConfig spiConfig {};
-
-
-    // Start CAN communication
-    mcp.begin(canConfig, spiConfig);
-
-
-    // Set receive interrupt handler
-    const uint8_t interruptPin = 20;
-    attachInterruptParam(interruptPin, [](void*) {
-
-        const auto message = mcp.readMessage();
-
-        Serial.println(message.id);
-
-        for (const auto& element : message.data)
-        {
-            Serial.print(element);
-            Serial.print(", ");
-        }
-        Serial.println();
-
-    }, LOW, nullptr);
-
+    mcp.begin();
 }
 
 void loop()
 {
-
     PicoMcp2515::CanMessage message {
         .id     = 0x0101,
         .length = 8,
@@ -61,8 +37,40 @@ void loop()
     mcp.writeMessage(message);
 
     delay(10);
-
 }
 ```
 
-## API
+### Receiver
+
+
+```cpp
+#include <PicoMcp2515.hpp>
+
+static PicoMcp2515 mcp {
+    .csPin = 0,
+    .intPin = 2,
+    ...
+    .baudrate = 1'000'000,
+    .oscClock = 16'000'000
+};
+
+void onReceive(const PicoMcp2515::CanMessage& message, void*)
+{
+    for (const auto& e : message.data)
+    {
+        Serial.print(e);
+        Serial.print(", ");
+    }
+    Serial.println();
+}
+
+void setup()
+{
+    mcp.begin();
+    mcp.onReceive(0x0101, onReceive, nullptr);
+}
+
+void loop()
+{
+}
+```
