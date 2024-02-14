@@ -195,6 +195,9 @@ public:
         gpio_put(cs, true);
     }
 
+    /// @brief Read to the selected register
+    /// @note Data sheet: p63 12.3
+    /// @note Overloading to simplify description when only one byte is received
     inline uint8_t readInstruction(Register startAddress) noexcept
     {
         uint8_t dist{};
@@ -260,6 +263,9 @@ public:
         gpio_put(cs, true);
     }
 
+    /// @brief Write to the selected register
+    /// @note Data sheet: p63 12.5
+    /// @note Overloading to simplify description when only one byte is sent
     inline void writeInstruction(Register startAddress, uint8_t src) noexcept
     {
         writeInstruction(startAddress, &src, sizeof src);
@@ -268,7 +274,7 @@ public:
     /// @brief Write 1 byte at a time 'in order from' the selected register (For TX buffer register)
     /// @param address register (TXB0SIDH, TXB1SIDH, TXB2SIDH, TXB0D0, TXB1D0, TXB2D0 only valid)
     /// @note Data sheet: p63 12.6
-    /// @note Compared to instructionRead, the number of bytes sent is reduced and speed is improved by including register selection bits in the instruction.
+    /// @note Compared to instructionWrite, the number of bytes sent is reduced and speed is improved by including register selection bits in the instruction.
     inline void writeTxBufferInstruction(Register startAddress, uint8_t const* src, size_t length) noexcept
     {
         // SPI transmit format (1byte): [instruction | startAddress(3bit)] + [data] + [data] + ...
