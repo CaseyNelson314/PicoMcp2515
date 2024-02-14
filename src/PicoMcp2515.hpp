@@ -1,7 +1,7 @@
 //
 //    MCP25625 library for the Raspberry Pi Pico
 //
-//    Copyleft (C) 2024 Okawa Yusuke
+//    Copyright (C) 2024 Okawa Yusuke
 //
 
 #pragma once
