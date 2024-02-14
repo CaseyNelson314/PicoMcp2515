@@ -312,8 +312,8 @@ public:
         TXB2,
     };
 
-    /// @brief 送信要求
-    /// @param txBuffer 送信バッファ
+    /// @brief Request to send
+    /// @param txBuffer transmit buffer
     /// @note Data sheet: p63 12.7
     inline void requestToSendInstruction(TxBuffer txBuffer) noexcept
     {
@@ -350,7 +350,7 @@ public:
         bool CANINTF_TX2IF : 1;
     };
 
-    /// @brief 部分的な状態読み込み
+    /// @brief Reads a bit in a determined register
     /// @note Data sheet: p64 12.8
     inline PartialStatus readStatusInstruction() noexcept
     {
@@ -412,12 +412,12 @@ public:
             RXF3,
             RXF4,
             RXF5,
-            RXF0Forwarded,    // RXB0に転送
-            RXF1Forwarded,    // RXB1に転送
+            RXF0Forwarded,    // Transferred to RXB0
+            RXF1Forwarded,    // Transferred to RXB1
         } filterMatch;
     };
 
-    /// @brief RX状態読み込み
+    /// @brief Read RX status
     /// @note Data sheet: p64 12.9
     inline RxStatus readRxStatusInstruction() noexcept
     {
@@ -480,7 +480,7 @@ public:
         return { messageBuffer, messageType, filterMatch };
     }
 
-    /// @brief ビット変更
+    /// @brief Change a specific bit in a register
     /// @param address register (BFPCTRL TXRTSCTRL CANSTATn CANCTRLn CNF3 CNF2 CNF1 CANINTE CANINTF EFLG TXB0CTRL TXB1CTRL TXB2CTRL RXB0CTRL RXB1CTRL only valid)
     /// @note Data sheet: p64 12.10
     inline void bitModifyInstruction(Register address, RegisterBitmask mask, uint8_t data) noexcept
