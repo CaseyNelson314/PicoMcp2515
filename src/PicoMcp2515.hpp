@@ -16,27 +16,23 @@
 class PicoMcp2515
     : InstructionSet
 {
-
 public:
-    struct SpiConfig
+    struct Config
     {
-        spi_inst_t* channel = spi_default;    // SPI channel (spi0 or spi1)
+        // SPI configuration
+        spi_inst_t* spi      = PICO_DEFAULT_SPI_INSTANCE;    // SPI channel (spi0 or spi1)
+        uint8_t     csPin    = PICO_DEFAULT_SPI_CSN_PIN;     // CS        pin
+        uint8_t     mosiPin  = PICO_DEFAULT_SPI_TX_PIN;      // MOSI (TX) pin
+        uint8_t     misoPin  = PICO_DEFAULT_SPI_RX_PIN;      // MISO (RX) pin
+        uint8_t     sckPin   = PICO_DEFAULT_SPI_SCK_PIN;     // SCK       pin
+        uint32_t    spiClock = 1'000'000;                    // SPI clock frequency [Hz]
 
-        uint8_t cs   = PICO_DEFAULT_SPI_CSN_PIN;    // CS        pin
-        uint8_t mosi = PICO_DEFAULT_SPI_TX_PIN;     // MOSI (TX) pin
-        uint8_t miso = PICO_DEFAULT_SPI_RX_PIN;     // MISO (RX) pin
-        uint8_t sck  = PICO_DEFAULT_SPI_SCK_PIN;    // SCK       pin
+        // CAN configuration
+        uint32_t canBaudrate = 1'000'000;    // CAN bus baudrate [bps]
 
-        uint32_t clock = 1'000'000;    // SPI clock frequency [Hz]
-    };
-
-    struct CanConfig
-    {
-        // uint8_t interrupt;    // Receive interrupt pin
-
-        uint32_t baudrate = 1'000'000;    // CAN bus baudrate [bps]
-
-        uint32_t oscClock = 16'000'000;    //  External oscillator frequency [Hz]
+        // Oscillator configuration for CAN controller
+        uint8_t  intPin;                   // Receive interrupt pin
+        uint32_t oscClock = 16'000'000;    // External oscillator frequency [Hz]
     };
 
     struct CanMessage
@@ -51,80 +47,115 @@ public:
     };
 
 
-    /// @brief construct PicoMcp2515 object
-    PicoMcp2515() noexcept
-        : InstructionSet{}
+    /**
+     * @brief construct PicoMcp2515 instance
+     * @param config configuration
+     */
+    PicoMcp2515(const Config& config) noexcept;
+
+
+    /**
+     * @brief begin CAN and SPI communication
+     */
+    bool begin() noexcept;
+
+
+    /**
+     * @brief end CAN and SPI communication
+     */
+    void end() noexcept;
+
+
+    /**
+     * @brief write CAN message
+     * @param message CAN message
+     * @return true: success, false: failure
+     */
+    bool writeMessage(const CanMessage& message) noexcept;
+
+
+    /**
+     * @brief Set the receive interrupt handler.
+     * @param callback Receive Interrupt Handler. (const CanMessage&, void*) -> void
+     * @param param    Arguments passed to the receive interrupt handler.
+     * @note param is for passing 'this pointer', etc.
+     */
+    void onReceive(void (*callback)(const CanMessage&, void*), void* param = nullptr) noexcept;
+
+
+    /**
+     * @brief read CAN message
+     * @return received CAN message
+     */
+    CanMessage readMessage() const noexcept;
+
+
+    // 動作モード
+    enum class OperationMode : uint8_t
     {
+        Normal = 0b000'00000,
+        // Sleep      = 0b001'00000,  // ウェイクアップ機能未実装
+        Loopback   = 0b010'00000,
+        ListenOnly = 0b011'00000,
+        Config     = 0b100'00000,
+    };
+
+    bool setOperationMode(OperationMode mode) noexcept;
+
+private:
+    Config config;
+
+    struct InterruptHandler
+    {
+        void (*callback)(const CanMessage&, void*) = {};
+        void* param                                = {};
+
+        void operator()(const CanMessage& message) const noexcept
+        {
+            if (callback)
+            {
+                callback(message, param);
+            }
+        }
+    };
+    InterruptHandler interruptHandler = {};
+};
+
+
+inline PicoMcp2515::PicoMcp2515(const Config& config) noexcept
+    : InstructionSet{ config.spi, config.csPin }
+    , config{ config }
+{
+}
+
+
+inline bool PicoMcp2515::begin() noexcept
+{
+    // begin SPI communication
+    {
+        (void)spi_init(/* spi_inst_t* spi      */ config.spi,
+                       /* uint        baudrate */ config.oscClock);
+
+        spi_set_format(/* spi_inst_t* spi       */ config.spi,
+                       /* uint        data_bits */ 8,
+                       /* spi_cpol_t  cpol      */ SPI_CPOL_0,
+                       /* spi_cpha_t  cpha      */ SPI_CPHA_0,
+                       /* spi_order_t order     */ SPI_MSB_FIRST);
+
+        spi_set_slave(/* spi_inst_t* spi   */ config.spi,
+                      /* bool        slave */ false);
+
+        gpio_set_function(config.mosiPin, GPIO_FUNC_SPI);
+        gpio_set_function(config.misoPin, GPIO_FUNC_SPI);
+        gpio_set_function(config.sckPin, GPIO_FUNC_SPI);
+
+        gpio_init(config.csPin);
+        gpio_set_dir(config.csPin, true);
+        gpio_put(config.csPin, true);
     }
 
-
-    /// @brief begin CAN and SPI communication
-    void begin(const CanConfig& canConfig,
-               const SpiConfig& spiConfig) noexcept
+    // begin CAN communication
     {
-        this->spiConfig = spiConfig;
-
-        InstructionSet::setChannel(spiConfig.channel);
-        InstructionSet::setCs(spiConfig.cs);
-
-        // begin SPI communication
-        {
-            (void)spi_init(/* spi_inst_t* spi      */ spiConfig.channel,
-                           /* uint        baudrate */ spiConfig.clock);
-
-
-            spi_set_format(/* spi_inst_t* spi       */ spiConfig.channel,
-                           /* uint        data_bits */ 8,
-                           /* spi_cpol_t  cpol      */ SPI_CPOL_0,
-                           /* spi_cpha_t  cpha      */ SPI_CPHA_0,
-                           /* spi_order_t order     */ SPI_MSB_FIRST);
-
-
-            spi_set_slave(/* spi_inst_t* spi   */ spiConfig.channel,
-                          /* bool        slave */ false);
-
-
-            gpio_set_function(spiConfig.mosi, GPIO_FUNC_SPI);
-            gpio_set_function(spiConfig.miso, GPIO_FUNC_SPI);
-            gpio_set_function(spiConfig.sck, GPIO_FUNC_SPI);
-
-
-            gpio_init(spiConfig.cs);
-            gpio_set_dir(spiConfig.cs, true);
-            gpio_put(spiConfig.cs, true);
-        }
-
-        // begin CAN communication
-        {
-            beginCanOnly(canConfig, spiConfig);
-        }
-    }
-
-
-    /// @brief end CAN and SPI communication
-    /// @note If started with begin function, must end with end function
-    void end() noexcept
-    {
-        // end CAN communication
-        {
-            endCanOnly();
-        }
-
-        // end SPI communication
-        {
-            spi_deinit(/* spi_inst_t* spi */ spiConfig.channel);
-        }
-    }
-
-
-    /// @brief begin CAN communication only
-    /// @note This function is useful when you want to use multiple SPI devices
-    /// @note SPI communication must be started by yourself
-    bool beginCanOnly(const CanConfig& canConfig,
-                      const SpiConfig& spiConfig) noexcept
-    {
-        this->spiConfig = spiConfig;
-
         // MCP2515 Reset
         {
             InstructionSet::resetInstruction();
@@ -135,7 +166,7 @@ public:
             // CNF1 Register = SJW[2] | BRP[6]
 
             // Find the BRP with the smallest Tq count
-            const auto nbt     = 1.f / canConfig.baudrate;
+            const auto nbt     = 1.f / config.canBaudrate;
             float      minDiff = FLT_MAX;
             uint8_t    brp     = 0;
             uint8_t    tqCount = 0;
@@ -143,7 +174,7 @@ public:
             for (uint8_t testBrp = 0; testBrp < 0b111111; ++testBrp)
             {
                 // Time Quantum (TQ)
-                const auto tq = 2.f * (testBrp + 1) / canConfig.oscClock;
+                const auto tq = 2.f * (testBrp + 1) / config.oscClock;
 
                 const auto testTqCount = nbt / tq;
 
@@ -226,14 +257,6 @@ public:
             InstructionSet::writeInstruction(Register::CNF3, transmitData, sizeof transmitData);
         }
 
-        // 通常モードに移行
-        {
-            if (not setOperationMode(OperationMode::Normal))
-            {
-                return false;
-            }
-        }
-
         // 送信バッファの優先順位を設定
         {
             // Transmit priority: TXB0 < TXB1 < TXB2 (To send older data first. Data is set from TXB0)
@@ -242,192 +265,189 @@ public:
             InstructionSet::bitModifyInstruction(Register::TXB2CTRL, RegisterBitmask::TXP, 0b0000'0010);
         }
 
-        return true;
-    }
-
-    // 動作モード
-    enum class OperationMode : uint8_t
-    {
-        Normal = 0b000'00000,
-        // Sleep      = 0b001'00000,  // ウェイクアップ機能未実装
-        Loopback   = 0b010'00000,
-        ListenOnly = 0b011'00000,
-        Config     = 0b100'00000,
-    };
-
-    bool setOperationMode(OperationMode mode) noexcept
-    {
-        const RegisterBitmask mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
-
-        InstructionSet::bitModifyInstruction(Register::CANCTRL1, mask, AsUnderlying(mode));
-
-        const uint8_t registerResult = InstructionSet::readInstruction(Register::CANSTAT1);
-
-        return (registerResult & AsUnderlying(mask)) == AsUnderlying(mode);
-    }
-
-
-    /// @brief end CAN communication only
-    /// @note SPI communication must be ended by yourself
-    void endCanOnly() noexcept {}
-
-
-    /// @brief write CAN message
-    /// @param message CAN message
-    bool writeMessage(const CanMessage& message) noexcept
-    {
-        // Check message arguments
-        if (message.length > CanMessage::MAX_DATA_LENGTH)
+        // 受信割り込み有効化
         {
-            // error: data length is too long
-            return false;
-        }
-        if (message.extended)
-        {
-            if (message.id > 0x1FFFFFFF)    // 29bit
+            InstructionSet::bitModifyInstruction(Register::CANINTE,
+                                                 RegisterBitmask::RX1IE | RegisterBitmask::RX0IE,
+                                                 AsUnderlying(RegisterBitmask::RX1IE | RegisterBitmask::RX0IE));
+
+            // GPIO interrupt configuration
             {
-                // error: extended ID is too long
-                return false;
-            }
-        }
-        else
-        {
-            if (message.id > 0x7FF)    // 11bit
-            {
-                // error: standard ID is too long
-                return false;
-            }
-        }
-        if (message.remote)
-        {
-            if (message.length > 0)
-            {
-                // error: remote frame must be 0 length
-                return false;
-            }
-        }
-        else
-        {
-            if (message.length == 0)
-            {
-                // error: data frame must be 1 ~ 8 length
-                return false;
+                gpio_init(config.intPin);
+                gpio_set_dir(config.intPin, GPIO_IN);
+                gpio_pull_up(config.intPin);
+                gpio_set_irq_enabled_with_callback(config.intPin, GPIO_IRQ_EDGE_RISE, true, [](uint gpio, uint32_t event_mask)
+                                                   { Serial.println("receive"); });
             }
         }
 
-
-        // Determine the TX buffer to be used for transmission
-        const auto status = InstructionSet::readStatusInstruction();
-        TxBuffer   TXBn;
-        Register   TXBnSIDH;
-        Register   TXBnCTRL;
-        if (not status.TXB0CNTRL_TXREQ)
+        // 通常モードに移行
         {
-            // status.TXBnCNTRL_TXREQ == false: TXBn is free
-            TXBn     = TxBuffer::TXB0;
-            TXBnSIDH = Register::TXB0SIDH;
-            TXBnCTRL = Register::TXB0CTRL;
-        }
-        else if (not status.TXB1CNTRL_TXREQ)
-        {
-            TXBn     = TxBuffer::TXB1;
-            TXBnSIDH = Register::TXB1SIDH;
-            TXBnCTRL = Register::TXB1CTRL;
-        }
-        else if (not status.TXB2CNTRL_TXREQ)
-        {
-            TXBn     = TxBuffer::TXB2;
-            TXBnSIDH = Register::TXB2SIDH;
-            TXBnCTRL = Register::TXB2CTRL;
-        }
-        else
-        {
-            // Transmission buffer is not free.
-            return false;
-        }
-
-
-        uint8_t transmitData[13];
-        if (message.extended)
-        {
-            // uint8_t message
-            return false;    // TODO: not implemented
-        }
-        else
-        {
-            const uint8_t idh   = static_cast<uint8_t>(message.id >> 3);          // ID[10:3]
-            const uint8_t idl   = static_cast<uint8_t>(message.id << 5);          // ID[2:0]
-            const uint8_t exide = static_cast<uint8_t>(message.extended << 3);    // 0: Standard frame, 1: Extended frame
-
-            transmitData[0] = idh;
-            transmitData[1] = idl | exide;
-        }
-
-        const uint8_t rtr = static_cast<uint8_t>(message.remote << 6);    // 0: Data frame, 1: Remote frame
-        const uint8_t dlc = static_cast<uint8_t>(message.length << 0);    // Data length code
-
-        transmitData[4] = rtr | dlc;
-
-        if (not message.remote)
-        {
-            memcpy(&transmitData[5], message.data, message.length);
-        }
-
-        // Write data to TX buffer
-        InstructionSet::writeTxBufferInstruction(TXBnSIDH, transmitData, 5 + message.length);
-
-        // transmit request
-        InstructionSet::requestToSendInstruction(TXBn);
-
-        const uint8_t transmitResult = InstructionSet::readInstruction(TXBnCTRL);
-
-        if (transmitResult & AsUnderlying(RegisterBitmask::MLOA))
-        {
-            // error: Arbitration lost (other nodes on the bus are transmitting)
-            return false;
-        }
-
-        if (transmitResult & AsUnderlying(RegisterBitmask::TXERR))
-        {
-            // error: Bus error occurred during message transmission.
-            return false;
+            if (not setOperationMode(OperationMode::Normal))
+            {
+                return false;
+            }
         }
 
         return true;
     }
+}
 
 
-    /// @brief Set the receive interrupt handler.
-    /// @param callback Receive Interrupt Handler. (const CanMessage&, void*) -> void
-    /// @param param    Arguments passed to the receive interrupt handler.
-    /// @note param is for passing 'this pointer', etc.
-    void onReceive(void (*callback)(const CanMessage&, void*), void* param = nullptr) noexcept
+inline void PicoMcp2515::end() noexcept
+{
+    // end CAN communication
+    {}
+
+    // end SPI communication
     {
-        interruptHandler = { callback, param };
+        spi_deinit(config.spi);
     }
+}
 
-    CanMessage readMessage() const noexcept
+
+inline bool PicoMcp2515::setOperationMode(OperationMode mode) noexcept
+{
+    const RegisterBitmask mask = RegisterBitmask::REQOP2 | RegisterBitmask::REQOP1 | RegisterBitmask::REQOP0;
+
+    InstructionSet::bitModifyInstruction(Register::CANCTRL1, mask, AsUnderlying(mode));
+
+    const uint8_t registerResult = InstructionSet::readInstruction(Register::CANSTAT1);
+
+    return (registerResult & AsUnderlying(mask)) == AsUnderlying(mode);
+}
+
+
+inline bool PicoMcp2515::writeMessage(const CanMessage& message) noexcept
+{
+    // Check message arguments
+    if (message.length > CanMessage::MAX_DATA_LENGTH)
     {
-        return {};
+        // error: data length is too long
+        return false;
     }
-
-private:
-    SpiConfig spiConfig = {};
-
-    struct InterruptHandler
+    if (message.extended)
     {
-        void (*callback)(const CanMessage&, void*) = nullptr;
-        void* param                                = nullptr;
-
-        void operator()(const CanMessage& message) const noexcept
+        if (message.id > 0x1FFFFFFF)    // 29bit
         {
-            if (callback)
-            {
-                callback(message, param);
-            }
+            // error: extended ID is too long
+            return false;
         }
-    };
-    InterruptHandler interruptHandler = {};
-};
+    }
+    else
+    {
+        if (message.id > 0x7FF)    // 11bit
+        {
+            // error: standard ID is too long
+            return false;
+        }
+    }
+    if (message.remote)
+    {
+        if (message.length > 0)
+        {
+            // error: remote frame must be 0 length
+            return false;
+        }
+    }
+    else
+    {
+        if (message.length == 0)
+        {
+            // error: data frame must be 1 ~ 8 length
+            return false;
+        }
+    }
 
-// #include "PicoMCP2515Impl.hpp"
+
+    // Determine the TX buffer to be used for transmission
+    const auto status = InstructionSet::readStatusInstruction();
+    TxBuffer   TXBn;
+    Register   TXBnSIDH;
+    Register   TXBnCTRL;
+    if (not status.TXB0CNTRL_TXREQ)
+    {
+        // status.TXBnCNTRL_TXREQ == false: TXBn is free
+        TXBn     = TxBuffer::TXB0;
+        TXBnSIDH = Register::TXB0SIDH;
+        TXBnCTRL = Register::TXB0CTRL;
+    }
+    else if (not status.TXB1CNTRL_TXREQ)
+    {
+        TXBn     = TxBuffer::TXB1;
+        TXBnSIDH = Register::TXB1SIDH;
+        TXBnCTRL = Register::TXB1CTRL;
+    }
+    else if (not status.TXB2CNTRL_TXREQ)
+    {
+        TXBn     = TxBuffer::TXB2;
+        TXBnSIDH = Register::TXB2SIDH;
+        TXBnCTRL = Register::TXB2CTRL;
+    }
+    else
+    {
+        // Transmission buffer is not free.
+        return false;
+    }
+
+
+    uint8_t transmitData[13];
+    if (message.extended)
+    {
+        // uint8_t message
+        return false;    // TODO: not implemented
+    }
+    else
+    {
+        const uint8_t idh   = static_cast<uint8_t>(message.id >> 3);          // ID[10:3]
+        const uint8_t idl   = static_cast<uint8_t>(message.id << 5);          // ID[2:0]
+        const uint8_t exide = static_cast<uint8_t>(message.extended << 3);    // 0: Standard frame, 1: Extended frame
+
+        transmitData[0] = idh;
+        transmitData[1] = idl | exide;
+    }
+
+    const uint8_t rtr = static_cast<uint8_t>(message.remote << 6);    // 0: Data frame, 1: Remote frame
+    const uint8_t dlc = static_cast<uint8_t>(message.length << 0);    // Data length code
+
+    transmitData[4] = rtr | dlc;
+
+    if (not message.remote)
+    {
+        memcpy(&transmitData[5], message.data, message.length);
+    }
+
+    // Write data to TX buffer
+    InstructionSet::writeTxBufferInstruction(TXBnSIDH, transmitData, 5 + message.length);
+
+    // transmit request
+    InstructionSet::requestToSendInstruction(TXBn);
+
+    const uint8_t transmitResult = InstructionSet::readInstruction(TXBnCTRL);
+
+    if (transmitResult & AsUnderlying(RegisterBitmask::MLOA))
+    {
+        // error: Arbitration lost (other nodes on the bus are transmitting)
+        return false;
+    }
+
+    if (transmitResult & AsUnderlying(RegisterBitmask::TXERR))
+    {
+        // error: Bus error occurred during message transmission.
+        return false;
+    }
+
+    return true;
+}
+
+
+inline void PicoMcp2515::onReceive(void (*callback)(const PicoMcp2515::CanMessage&, void*), void* param) noexcept
+{
+    interruptHandler = { callback, param };
+}
+
+
+inline PicoMcp2515::CanMessage PicoMcp2515::readMessage() const noexcept
+{
+    return {};
+}

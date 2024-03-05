@@ -17,22 +17,13 @@ class InstructionSet
     uint8_t cs;
 
 public:
-    InstructionSet() noexcept
-        : channel(spi_default)
-        , cs(PICO_DEFAULT_SPI_CSN_PIN)
-    {
-    }
 
     InstructionSet(spi_inst_t* channel, uint8_t cs) noexcept
         : channel(channel)
         , cs(cs)
     {
     }
-
-    void setChannel(spi_inst_t* channel) noexcept { this->channel = channel; }
-
-    void setCs(uint8_t cs) noexcept { this->cs = cs; }
-
+    
 
     //--------------------------------------------------------------------------------
     //  Register Map
